@@ -19,14 +19,32 @@ official: true
 
 ## 二、核心设计原则
 
+### ⚠️ 重要：使用流程（必须严格遵循）
+
+```
+用户请求 → URL解析(含Wiki探测) → 权限预检查 → [需要授权?] → OAuth2授权 → 执行操作
+                                              ↓
+                                         无需授权 → 直接执行操作
+```
+
+**❌ 错误流程（会导致授权不及时）：**
+```
+访问文档 → 失败(无权限) → 回头检查权限 → 申请授权
+```
+
+**✅ 正确流程：**
+```
+解析URL → 预检查权限 → 立即触发授权 → 获取Token → 访问文档
+```
+
 ### 2.1 智能路由引擎
 
 ```
-用户请求 → URL/Token 解析 → 类型识别 → 权限检查 → 执行操作
-                              ↓
-                    ┌─────────┼─────────┐
-                    ↓         ↓         ↓
-                 文档路由   表格路由   多维表路由
+用户请求 → URL/Token 解析(含Wiki/云空间API探测) → 权限预检查 → 执行操作
+                              ↓                              ↓
+                    ┌─────────┴─────────┐           ┌────────┴────────┐
+                    ↓                   ↓           ↓                 ↓
+                 需要授权           无需授权    OAuth2授权         直接执行
 ```
 
 ### 2.2 权限申请机制
@@ -67,15 +85,102 @@ official: true
 
 ## 三、工具列表
 
-### 3.1 路由与权限管理 (优先级最高)
+## 三、工具列表
 
-| 工具名 | 功能 |
-|-------|------|
-| `feishu_router.parseUrl` | 解析飞书 URL，自动识别文档类型 |
-| `feishu_router.analyzeRequest` | 分析用户请求意图，确定操作类型 |
-| `feishu_auth.requestUserPermission` | 请求用户授权（双通道） |
-| `feishu_auth.checkAndRefreshToken` | 检查并刷新访问令牌 |
-| `feishu_auth.getUserAuthorizationList` | 获取用户已授权文档列表 |
+### 3.1 路由与权限管理 (⭐ 优先级最高，务必先执行)
+
+| 工具名 | 功能 | 使用时机 |
+|-------|------|---------|
+| `feishu_router.parseUrl` | 解析飞书 URL，**包含 Wiki 类型 API 探测** | 收到用户请求时**第一优先级** |
+| `feishu_router.resolveWikiType` | **通过 API 探测 Wiki 链接的实际类型**（表格/多维表格/文档） | 当 URL 包含 `/wiki/` 时自动调用 |
+| `feishu_router.analyzeRequest` | 分析用户请求意图，确定操作类型 | 解析 URL 后 |
+| `feishu_auth.checkDocumentPermission` | **权限预检查**，在访问前确认是否有权限 | 解析 URL 后、**访问任何文档前** |
+| `feishu_auth.requestUserPermission` | **立即触发** OAuth2 授权（双通道） | 检查发现无权限时**立即执行** |
+| `feishu_auth.checkAndRefreshToken` | 检查并刷新访问令牌 | 授权后获取 Token 时 |
+
+---
+
+## 四、⭐ 关键优化：Wiki 链接处理
+
+### 4.1 为什么 Wiki 链接特殊？
+
+`feishu.cn/wiki/xxx` 链接可能指向：
+- 飞书表格（Sheet）⭐ 最常见
+- 飞书文档（Docx）
+- 飞书多维表格（Bitable）
+- 云空间文件夹
+
+**无法通过 URL 本身判断类型，必须通过 API 探测！**
+
+### 4.2 Wiki 链接解析流程
+
+```typescript
+/**
+ * ⭐ 必须使用的 Wiki 解析流程
+ */
+async function parseWikiUrl(url: string, client) {
+  const token = extractToken(url); // 从 wiki/xxx 提取 token
+  
+  // ⭐ 并行探测三种可能类型（最快方式）
+  const results = await Promise.allSettled([
+    // 尝试表格 API
+    client.sheets.spreadsheet.get({ path: { spreadsheet_token: token } }),
+    // 尝试多维表格 API  
+    client.bitable.app.get({ path: { app_token: token } }),
+    // 尝试文档 API
+    client.docx.document.get({ path: { document_id: token } }),
+  ]);
+  
+  // 返回第一个成功的
+  if (results[0].status === 'fulfilled') {
+    return { type: 'sheet', token, source: 'wiki' };
+  }
+  if (results[1].status === 'fulfilled') {
+    return { type: 'bitable', token, source: 'wiki' };
+  }
+  if (results[2].status === 'fulfilled') {
+    return { type: 'doc', token, source: 'wiki' };
+  }
+  
+  throw new Error('无法解析 Wiki 链接类型');
+}
+```
+
+### 4.3 完整调用示例
+
+```typescript
+// 用户：帮我分析这个文档 https://mi.feishu.cn/wiki/A8k9wdtxn...
+
+async function handleRequest(url: string) {
+  // ⭐ 第1步：解析 URL（自动处理 Wiki）
+  const parsed = await feishu_router.parseUrl(url); 
+  // 如果是 wiki，会自动调用 resolveWikiType 探测类型
+  
+  // ⭐ 第2步：权限预检查（必须在访问前！）
+  const permission = await feishu_auth.checkDocumentPermission({
+    docType: parsed.type,
+    docToken: parsed.token,
+  });
+  
+  if (!permission.hasAccess) {
+    // ⭐ 第3步：立即触发授权（不要等访问失败！）
+    await feishu_auth.requestUserPermission({
+      docType: parsed.type,
+      docToken: parsed.token,
+      requiredPermissions: ['read'],
+    });
+    return { status: 'waiting_auth' };
+  }
+  
+  // 第4步：执行操作
+  const data = await feishu_sheet.getValues({
+    spreadsheetToken: parsed.token,
+    range: 'A1:Z100',
+  });
+  
+  return { data };
+}
+```
 
 ### 3.2 飞书文档 (Docx) 工具
 

@@ -4,12 +4,145 @@
 
 ### 1.1 文档类型识别
 
+⚠️ **重要：支持 Wiki 链接识别**
+
 | 文档类型 | Token 前缀 | URL 模式 | 示例 |
 |---------|-----------|---------|------|
 | 旧版文档 | `doccn` / `doxcn` | `feishu.cn/docx/{token}` | `feishu.cn/docx/doccnxxxx` |
 | 新版文档 | `doxcn` | `feishu.cn/docx/{token}` | `feishu.cn/docx/doxcnyyyy` |
 | 表格 | `shtcn` / `shtxn` | `feishu.cn/sheets/{token}` | `feishu.cn/sheets/shtcnxxxx` |
 | 多维表格 | `bascn` / `basxn` | `feishu.cn/base/{token}` | `feishu.cn/base/bascnxxxx` |
+| **Wiki/云空间** | `混合` | `feishu.cn/wiki/{token}` ⭐ | `feishu.cn/wiki/A8k9wdtxn...` |
+
+### 1.2 Wiki 链接特殊处理
+
+```typescript
+/**
+ * ⭐ 优化：Wiki 链接智能识别
+ * 
+ * Wiki 链接可能是：
+ * 1. 飞书表格 (sheets) - 最常见
+ * 2. 飞书文档 (docx)
+ * 3. 飞书多维表格 (bitable/base)
+ * 
+ * 必须通过 API 查询实际类型，不能仅凭 URL 判断！
+ */
+export interface ParsedUrl {
+  type: 'doc' | 'sheet' | 'bitable' | 'wiki';
+  token: string;
+  rawUrl: string;
+  tableId?: string;  // 多维表格可能包含 tableId
+  viewId?: string;   // 视图 ID
+  resolvedFrom?: 'wiki';  // 标记从 wiki 解析
+}
+
+/**
+ * 解析飞书 URL，自动识别文档类型（包括 Wiki）
+ */
+export function parseFeishuUrl(url: string): ParsedUrl {
+  const cleanUrl = url.split('?')[0];
+  
+  // 文档
+  const docMatch = cleanUrl.match(/feishu\.cn\/docx\/([a-zA-Z0-9]+)/);
+  if (docMatch) {
+    return { type: 'doc', token: docMatch[1], rawUrl: url };
+  }
+  
+  // 表格
+  const sheetMatch = cleanUrl.match(/feishu\.cn\/sheets\/([a-zA-Z0-9]+)/);
+  if (sheetMatch) {
+    return { type: 'sheet', token: sheetMatch[1], rawUrl: url };
+  }
+  
+  // 多维表格
+  const bitableMatch = cleanUrl.match(/feishu\.cn\/base\/([a-zA-Z0-9]+)/);
+  if (bitableMatch) {
+    const parsed: ParsedUrl = {
+      type: 'bitable',
+      token: bitableMatch[1],
+      rawUrl: url,
+    };
+    
+    const tableMatch = url.match(/[?&]table=([a-zA-Z0-9]+)/);
+    if (tableMatch) parsed.tableId = tableMatch[1];
+    
+    const viewMatch = url.match(/[?&]view=([a-zA-Z0-9]+)/);
+    if (viewMatch) parsed.viewId = viewMatch[1];
+    
+    return parsed;
+  }
+  
+  // ⭐ 重点优化：Wiki/云空间链接处理
+  const wikiMatch = cleanUrl.match(/feishu\.cn\/wiki\/([a-zA-Z0-9]+)/);
+  if (wikiMatch) {
+    // Wiki 链接无法直接判断类型，需要通过 API 查询
+    // 这里返回 wiki 类型，由后续流程通过 API 查询实际类型
+    return { 
+      type: 'wiki',  // 标记为 wiki 类型，后续通过 API 查询
+      token: wikiMatch[1], 
+      rawUrl: url,
+    };
+  }
+  
+  throw new Error(`无法识别的飞书 URL 格式: ${url}`);
+}
+
+/**
+ * ⭐ 新增：通过 API 查询 Wiki 链接的实际类型
+ * 
+ * 这是解决"无法快速识别 wiki 链接"问题的关键！
+ */
+export async function resolveWikiType(
+  wikiToken: string, 
+  client: any
+): Promise<ParsedUrl> {
+  // ⭐ 并行探测三种可能类型（最快方式）
+  const results = await Promise.allSettled([
+    // 方法1：尝试获取表格信息
+    client.sheets.spreadsheet.get({
+      path: { spreadsheet_token: wikiToken },
+    }),
+    // 方法2：尝试获取多维表格信息
+    client.bitable.app.get({
+      path: { app_token: wikiToken },
+    }),
+    // 方法3：尝试获取文档信息
+    client.docx.document.get({
+      path: { document_id: wikiToken },
+    }),
+  ]);
+  
+  // 返回第一个成功的
+  if (results[0].status === 'fulfilled') {
+    return {
+      type: 'sheet',
+      token: wikiToken,
+      rawUrl: `https://feishu.cn/sheets/${wikiToken}`,
+      resolvedFrom: 'wiki',
+    };
+  }
+  
+  if (results[1].status === 'fulfilled') {
+    return {
+      type: 'bitable',
+      token: wikiToken,
+      rawUrl: `https://feishu.cn/base/${wikiToken}`,
+      resolvedFrom: 'wiki',
+    };
+  }
+  
+  if (results[2].status === 'fulfilled') {
+    return {
+      type: 'doc',
+      token: wikiToken,
+      rawUrl: `https://feishu.cn/docx/${wikiToken}`,
+      resolvedFrom: 'wiki',
+    };
+  }
+  
+  throw new Error(`无法解析 Wiki 类型，token: ${wikiToken}`);
+}
+```
 
 ### 1.2 Token 解析函数
 
