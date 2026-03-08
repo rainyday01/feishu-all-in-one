@@ -1,0 +1,32 @@
+{
+  "name": "feishu-all-in-one",
+  "version": "0.0.3",
+  "description": "飞书全功能集成技能 - 支持文档、表格、多维表格的完整操作",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "feishu",
+    "lark",
+    "bitable",
+    "doc",
+    "sheet",
+    "lobsterai",
+    "skill"
+  ],
+  "author": "rainyday01",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rainyday01/feishu-all-in-one.git"
+  },
+  "bugs": {
+    "url": "https://github.com/rainyday01/feishu-all-in-one/issues"
+  },
+  "homepage": "https://github.com/rainyday01/feishu-all-in-one#readme",
+  "dependencies": {},
+  "engines": {
+    "node": ">=14.0.0"
+  }
+}
